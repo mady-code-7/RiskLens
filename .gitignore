@@ -6,3 +6,5 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+backend/model.pkl
+backend/dataset.csv
