@@ -11,6 +11,15 @@ It works purely by analyzing the **text of the URL itself** (length, symbols, ke
 
 ---
 
+## Live Demo
+
+- App: https://risk-lens-hla4.onrender.com
+- API: https://risklens-1hsm.onrender.com
+
+Note: the backend is on Render's free tier, so it may take 30–50 seconds to wake up on the first request after a period of inactivity.
+
+---
+
 ## How it works
 
 User types a URL into the React app
@@ -52,6 +61,25 @@ RiskLens/
     - main.jsx
   - package.json
 - README.md
+
+## Running Locally
+
+### Backend
+
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload
+
+Runs at http://localhost:8000
+
+### Frontend
+
+cd frontend
+cp .env.example .env
+npm install
+npm run dev
+
+Runs at http://localhost:5173 and expects the backend at the URL set in `VITE_API_BASE_URL` (defaults to http://localhost:8000).
 
 ## Notes
 
