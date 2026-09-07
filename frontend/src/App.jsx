@@ -1,5 +1,41 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, Component } from 'react'
 import './App.css'
+
+// Error boundaries must be class components — React has no hook
+// equivalent. This catches any unexpected rendering crash (e.g. a
+// future code change that mishandles a weird API response) so the
+// visitor sees a recoverable message instead of a blank white page.
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false }
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error, info) {
+    console.error('RiskLens crashed:', error, info)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="app">
+          <div className="result-area">
+            <div className="state state--error">
+              <p className="error-message">
+                Something went wrong. Please refresh the page and try again.
+              </p>
+            </div>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 // Backend base URL. In production, set VITE_API_BASE_URL in your hosting
 // provider's environment settings (e.g. Vercel/Netlify project settings)
@@ -14,6 +50,16 @@ const LEVEL_CLASS = {
   Dangerous: 'level-dangerous',
 }
 
+// Real URLs are practically never this long. Rejecting early avoids
+// sending huge payloads to the backend and keeps the UI responsive.
+const MAX_URL_LENGTH = 2048
+
+// Minimum time between checks. This is a courtesy speed bump for normal
+// users double-clicking, not a security control — anyone can call the
+// API directly and skip the frontend entirely. Real abuse protection
+// (rate limiting) has to live on the backend.
+const COOLDOWN_MS = 1500
+
 // Rough client-side sanity check. The backend remains the source of truth
 // for real validation — this just catches empty/obviously-broken input
 // before spending a network round trip.
@@ -27,12 +73,14 @@ function looksLikeUrl(value) {
   }
 }
 
-function App() {
+function RiskLensApp() {
   const [url, setUrl] = useState('')
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [isCoolingDown, setIsCoolingDown] = useState(false)
   const inputRef = useRef(null)
+  const lastCheckAtRef = useRef(0)
 
   const handleCheck = async () => {
     const trimmedUrl = url.trim()
@@ -44,12 +92,25 @@ function App() {
       return
     }
 
+    if (trimmedUrl.length > MAX_URL_LENGTH) {
+      setError(`That URL is too long (max ${MAX_URL_LENGTH} characters).`)
+      setResult(null)
+      inputRef.current?.focus()
+      return
+    }
+
     if (!looksLikeUrl(trimmedUrl)) {
       setError("That doesn't look like a valid URL. Try something like example.com.")
       setResult(null)
       inputRef.current?.focus()
       return
     }
+
+    const now = Date.now()
+    if (now - lastCheckAtRef.current < COOLDOWN_MS) {
+      return
+    }
+    lastCheckAtRef.current = now
 
     setIsLoading(true)
     setError(null)
@@ -89,11 +150,13 @@ function App() {
       } else if (err.message === 'Failed to fetch') {
         setError('Could not reach the RiskLens API. Please try again shortly.')
       } else {
-        setError(err.message)
+        setError('Something went wrong. Please try again.')
       }
     } finally {
       clearTimeout(timeout)
       setIsLoading(false)
+      setIsCoolingDown(true)
+      setTimeout(() => setIsCoolingDown(false), COOLDOWN_MS)
     }
   }
 
@@ -149,6 +212,7 @@ function App() {
               autoComplete="off"
               autoCapitalize="off"
               spellCheck="false"
+              maxLength={MAX_URL_LENGTH}
               placeholder="e.g. secure-paypa1-login.com"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
@@ -157,7 +221,7 @@ function App() {
               aria-invalid={Boolean(error)}
               disabled={isLoading}
             />
-            <button type="submit" disabled={isLoading}>
+            <button type="submit" disabled={isLoading || isCoolingDown}>
               {isLoading ? (
                 <>
                   <span className="spinner" aria-hidden="true" />
@@ -229,6 +293,14 @@ function App() {
         <p>RiskLens flags patterns common in phishing URLs. Always use your own judgment.</p>
       </footer>
     </div>
+  )
+}
+
+function App() {
+  return (
+    <ErrorBoundary>
+      <RiskLensApp />
+    </ErrorBoundary>
   )
 }
 

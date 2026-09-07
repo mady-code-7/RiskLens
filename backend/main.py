@@ -9,10 +9,17 @@ Defines a single POST /check endpoint that ties together:
 The model is loaded once at startup (not per-request) for performance.
 """
 
-from fastapi import FastAPI, HTTPException
+import os
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import joblib
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from features import extract_features, FEATURE_NAMES
 
@@ -20,21 +27,31 @@ MODEL_PATH = "model.pkl"
 
 app = FastAPI(title="RiskLens API")
 
+# Rate limiting: caps how many requests a single visitor (identified by
+# IP address) can make per minute. This protects the backend from being
+# hammered directly (e.g. a script bypassing the website entirely and
+# calling /check thousands of times), which the frontend alone can never
+# prevent since it can always be skipped.
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Allow the frontend (running on a different origin) to call this API.
 #
-# ALLOWED_ORIGINS lists every frontend URL permitted to call this backend.
-# Update the Render URL below once the frontend service is deployed —
-# Render assigns the URL only after the first deploy, so this may need
-# a one-time edit + redeploy after that happens.
+# FRONTEND_URL must be set in Render's environment settings to the deployed
+# frontend origin (e.g. https://your-frontend.onrender.com). Comma-separated
+# values are accepted if more than one origin needs to call this API.
+# Locally we fall back to the Vite dev server so CORS works with zero setup.
 #
 # allow_credentials=False because this API takes no cookies/auth headers;
 # note that allow_origins=["*"] and allow_credentials=True can never be
 # combined (browsers reject that combination outright), so if credentials
 # are ever needed later, ALLOWED_ORIGINS must list explicit origins, never "*".
-ALLOWED_ORIGINS = [
-    "http://localhost:5173",  # Vite local dev server
-    "https://risklens-frontend.onrender.com",  # TODO: replace with your actual Render frontend URL
-]
+_DEFAULT_FRONTEND_ORIGIN = "http://localhost:5173"
+_frontend_url = os.getenv("FRONTEND_URL", _DEFAULT_FRONTEND_ORIGIN)
+ALLOWED_ORIGINS = [origin.strip() for origin in _frontend_url.split(",") if origin.strip()]
+if not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS = [_DEFAULT_FRONTEND_ORIGIN]
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,6 +60,40 @@ app.add_middleware(
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
+
+# POST /check only needs a short JSON body ({"url": "..."}). Cap the raw
+# request size so a huge payload is rejected before JSON parsing/validation.
+MAX_CHECK_BODY_BYTES = 10 * 1024  # 10KB
+
+
+@app.middleware("http")
+async def limit_check_body_size(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/check":
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid Content-Length header."},
+                )
+            if declared_size > MAX_CHECK_BODY_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": "Request body too large."},
+                )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
 
 # Loaded once at startup, reused across all requests.
 model = joblib.load(MODEL_PATH)
@@ -122,17 +173,27 @@ def score_to_level(score: int) -> str:
 
 
 @app.post("/check", response_model=CheckResponse)
-def check_url(request: URLRequest):
-    url = request.url.strip()
+@limiter.limit("10/minute")
+def check_url(request: Request, body: URLRequest):
+    url = body.url.strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL must not be empty.")
+
+    if len(url) > 2048:
+        raise HTTPException(status_code=400, detail="URL is too long.")
 
     # Layer 2: Feature Extraction
     feature_values = extract_features(url)
 
     # Layer 3: Model Inference
     # predict_proba returns [[prob_class_0, prob_class_1]]; class 1 = phishing.
-    phishing_probability = model.predict_proba([feature_values])[0][1]
+    try:
+        phishing_probability = model.predict_proba([feature_values])[0][1]
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong processing this URL.",
+        )
 
     # Layer 4: Response building
     score = probability_to_score(phishing_probability)

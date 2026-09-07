@@ -57,3 +57,7 @@ RiskLens/
 
 - dataset.csv currently contains synthetic placeholder data (see generate_dataset.py). Swap it for a real phishing-URL dataset (same url,label format) and re-run train_model.py to retrain on real data.
 - No authentication, no database, no history storage. One input, one action, one result.
+
+## Known Limitations
+
+Because this is an open-source project, the feature-extraction logic in `features.py` is publicly visible. A motivated attacker could theoretically reverse-engineer the model's signals (keyword list, numeric thresholds, known-shortener list) and craft URLs that avoid every flagged feature. That is an inherent trade-off of open-source security tooling, not a bug.
