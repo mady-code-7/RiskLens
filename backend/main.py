@@ -20,14 +20,28 @@ MODEL_PATH = "model.pkl"
 
 app = FastAPI(title="RiskLens API")
 
-# Allow the frontend (running on a different origin/port) to call this API.
-# For a real deployment, replace "*" with the actual frontend URL(s).
+# Allow the frontend (running on a different origin) to call this API.
+#
+# ALLOWED_ORIGINS lists every frontend URL permitted to call this backend.
+# Update the Render URL below once the frontend service is deployed —
+# Render assigns the URL only after the first deploy, so this may need
+# a one-time edit + redeploy after that happens.
+#
+# allow_credentials=False because this API takes no cookies/auth headers;
+# note that allow_origins=["*"] and allow_credentials=True can never be
+# combined (browsers reject that combination outright), so if credentials
+# are ever needed later, ALLOWED_ORIGINS must list explicit origins, never "*".
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",  # Vite local dev server
+    "https://risklens-frontend.onrender.com",  # TODO: replace with your actual Render frontend URL
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 # Loaded once at startup, reused across all requests.
@@ -139,5 +153,4 @@ def check_url(request: URLRequest):
 @app.get("/")
 def root():
     return {"status": "RiskLens API is running", "endpoint": "POST /check"}
-
     
