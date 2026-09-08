@@ -1,4 +1,4 @@
-import { useState, useRef, Component } from 'react'
+import { useState, useRef, useEffect, Component } from 'react'
 import './App.css'
 
 // Error boundaries must be class components — React has no hook
@@ -60,6 +60,20 @@ const MAX_URL_LENGTH = 2048
 // (rate limiting) has to live on the backend.
 const COOLDOWN_MS = 1500
 
+// Free-tier hosts (e.g. Render) spin the backend down after inactivity,
+// and waking it back up can take well past a normal request's timeout.
+// FIRST_ATTEMPT_TIMEOUT_MS covers a warm backend. If that attempt times
+// out, we assume the server is asleep, retry once with a much longer
+// window, and show a "waking up" message instead of an error so a cold
+// start doesn't look like a failure.
+const FIRST_ATTEMPT_TIMEOUT_MS = 8000
+const RETRY_TIMEOUT_MS = 45000
+
+// If the first attempt is still running after this long, the backend is
+// probably waking up rather than just being slow — switch the loading
+// copy to say so.
+const SLOW_RESPONSE_HINT_MS = 4000
+
 // Rough client-side sanity check. The backend remains the source of truth
 // for real validation — this just catches empty/obviously-broken input
 // before spending a network round trip.
@@ -79,8 +93,22 @@ function RiskLensApp() {
   const [error, setError] = useState(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isCoolingDown, setIsCoolingDown] = useState(false)
+  const [isWaking, setIsWaking] = useState(false)
+  const [showSlowHint, setShowSlowHint] = useState(false)
   const inputRef = useRef(null)
   const lastCheckAtRef = useRef(0)
+
+  // During the first attempt, if it's taking a while, hint that the
+  // server might be waking up rather than leaving a bare spinner —
+  // avoids it looking frozen before the retry logic even kicks in.
+  useEffect(() => {
+    if (!isLoading || isWaking) {
+      setShowSlowHint(false)
+      return
+    }
+    const timer = setTimeout(() => setShowSlowHint(true), SLOW_RESPONSE_HINT_MS)
+    return () => clearTimeout(timer)
+  }, [isLoading, isWaking])
 
   const handleCheck = async () => {
     const trimmedUrl = url.trim()
@@ -113,12 +141,46 @@ function RiskLensApp() {
     lastCheckAtRef.current = now
 
     setIsLoading(true)
+    setIsWaking(false)
     setError(null)
     setResult(null)
 
-    // Abort if the backend hangs, so the button never gets stuck forever.
+    try {
+      // First attempt: assumes a warm backend. Short timeout so a genuinely
+      // sleeping server fails fast and we can move on to the retry rather
+      // than making the user wait through two long timeouts back to back.
+      const data = await attemptCheck(trimmedUrl, FIRST_ATTEMPT_TIMEOUT_MS)
+      setResult(data)
+    } catch (firstErr) {
+      if (firstErr.name !== 'AbortError') {
+        // Not a timeout — a real error (bad response, network failure, etc).
+        // Retrying won't help, so surface it immediately.
+        setError(describeError(firstErr))
+        clearLoadingState()
+        return
+      }
+
+      // Timed out on the first try — likely a cold start on a free-tier
+      // host. Retry once with a much longer window, and let the user know
+      // the server is waking up rather than just showing a spinner.
+      setIsWaking(true)
+      try {
+        const data = await attemptCheck(trimmedUrl, RETRY_TIMEOUT_MS)
+        setResult(data)
+      } catch (secondErr) {
+        setError(describeError(secondErr))
+      }
+    } finally {
+      clearLoadingState()
+    }
+  }
+
+  // Runs one fetch attempt against the backend with the given timeout.
+  // Throws on non-OK responses, malformed payloads, network failure, or
+  // abort (timeout) — callers decide how to react to each.
+  const attemptCheck = async (trimmedUrl, timeoutMs) => {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 15000)
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
     try {
       const response = await fetch(`${API_BASE_URL}/check`, {
@@ -143,21 +205,27 @@ function RiskLensApp() {
         throw new Error('Received an unexpected response from the server.')
       }
 
-      setResult(data)
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        setError('The request took too long. Please try again.')
-      } else if (err.message === 'Failed to fetch') {
-        setError('Could not reach the RiskLens API. Please try again shortly.')
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
+      return data
     } finally {
       clearTimeout(timeout)
-      setIsLoading(false)
-      setIsCoolingDown(true)
-      setTimeout(() => setIsCoolingDown(false), COOLDOWN_MS)
     }
+  }
+
+  const describeError = (err) => {
+    if (err.name === 'AbortError') {
+      return "The server is taking longer than expected to wake up. Please try again in a moment."
+    }
+    if (err.message === 'Failed to fetch') {
+      return 'Could not reach the RiskLens API. Please try again shortly.'
+    }
+    return 'Something went wrong. Please try again.'
+  }
+
+  const clearLoadingState = () => {
+    setIsLoading(false)
+    setIsWaking(false)
+    setIsCoolingDown(true)
+    setTimeout(() => setIsCoolingDown(false), COOLDOWN_MS)
   }
 
   const handleKeyDown = (e) => {
@@ -242,7 +310,17 @@ function RiskLensApp() {
           ) : isLoading ? (
             <div className="state state--loading">
               <div className="scan-line" aria-hidden="true" />
-              <p className="placeholder">Analyzing URL structure and signals&hellip;</p>
+              {isWaking ? (
+                <p className="placeholder placeholder--waking">
+                  Waking up the server&hellip; this can take up to a minute on the first check.
+                </p>
+              ) : showSlowHint ? (
+                <p className="placeholder placeholder--waking">
+                  Still working&hellip; the server may be starting up.
+                </p>
+              ) : (
+                <p className="placeholder">Analyzing URL structure and signals&hellip;</p>
+              )}
             </div>
           ) : result === null ? (
             <div className="state state--empty">

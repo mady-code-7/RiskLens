@@ -226,6 +226,10 @@ main {
   font-size: 0.95rem;
 }
 
+.placeholder--waking {
+  color: var(--suspicious);
+}
+
 .state--loading {
   position: relative;
 }
