@@ -26,7 +26,7 @@ class ErrorBoundary extends Component {
           <div className="result-area">
             <div className="state state--error">
               <p className="error-message">
-                Something went wrong. Please refresh the page and try again.
+                Too many requests. Please try again later.
               </p>
             </div>
           </div>
@@ -218,7 +218,7 @@ function RiskLensApp() {
     if (err.message === 'Failed to fetch') {
       return 'Could not reach the RiskLens API. Please try again shortly.'
     }
-    return 'Something went wrong. Please try again.'
+    return 'Take a break. Please try again later.'
   }
 
   const clearLoadingState = () => {
