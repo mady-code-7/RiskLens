@@ -21,7 +21,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from features import extract_features, FEATURE_NAMES
+from features import extract_features, FEATURE_NAMES, InvalidURLError
 
 MODEL_PATH = "model.pkl"
 
@@ -183,7 +183,14 @@ def check_url(request: Request, body: URLRequest):
         raise HTTPException(status_code=400, detail="URL is too long.")
 
     # Layer 2: Feature Extraction
-    feature_values = extract_features(url)
+    # extract_features() validates that `url` looks like a single bare
+    # URL before scoring it. Malformed input (markdown links, HTML,
+    # multiple URLs pasted together, embedded whitespace) is rejected
+    # here rather than silently producing meaningless features.
+    try:
+        feature_values = extract_features(url)
+    except InvalidURLError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Layer 3: Model Inference
     # predict_proba returns [[prob_class_0, prob_class_1]]; class 1 = phishing.

@@ -29,6 +29,68 @@ SHORTENER_DOMAINS = [
     "is.gd", "buff.ly", "adf.ly", "shorte.st", "cutt.ly",
 ]
 
+# Characters that should never legitimately appear in a URL a user is
+# submitting for a check. Their presence almost always means the input
+# isn't a bare URL at all — e.g. markdown link syntax
+# "[text](https://real-url.com)", HTML <a> tags, or other wrapped/embedded
+# text where the "URL" is actually markup containing a URL somewhere
+# inside it. Feeding that raw string into feature extraction produces
+# meaningless features (wrong length, wrong dot count, scheme buried
+# mid-string so is_https misses it, etc).
+_DISALLOWED_RAW_CHARS = re.compile(r"[\[\]<>\s\"'`]")
+
+# A single, deliberately permissive check for "does this look like one
+# bare URL/hostname". It is NOT a full RFC validator — it just rejects
+# the obvious non-URL cases (markdown, HTML, multiple URLs pasted
+# together, plain prose) so the feature extractor never has to guess
+# what a malformed string "meant".
+#
+# Note: '@' is deliberately allowed in the authority segment. The
+# "user@host" / "fakedomain.com@real-ip" trick (used to disguise the
+# real destination behind what looks like a trusted domain) is a real,
+# important phishing signal that has_at_symbol is specifically meant to
+# catch — rejecting it here would strip that signal out of training
+# data and block real reports at inference time.
+_BARE_URL_PATTERN = re.compile(
+    r"^(?:[a-zA-Z][a-zA-Z0-9+.\-]*://)?"   # optional scheme
+    r"[^\s/:]+(?::\d+)?"                    # authority (+ optional port)
+    r"(?:/[^\s]*)?$"                        # optional path/query/fragment
+)
+
+
+class InvalidURLError(ValueError):
+    """Raised when the input doesn't look like a single bare URL/hostname."""
+
+
+def normalize_and_validate_url(raw: str) -> str:
+    """
+    Validates that `raw` looks like one bare URL (optionally missing its
+    scheme), and returns it stripped of surrounding whitespace.
+
+    Rejects things like markdown links ("[text](url)"), HTML anchor tags,
+    strings containing embedded whitespace/quotes, and multiple URLs
+    pasted together — these are not "a URL", they're text that happens to
+    contain one, and scoring them directly produces meaningless features.
+
+    Raises:
+        InvalidURLError: if the input doesn't look like a single bare URL.
+    """
+    candidate = raw.strip()
+    if not candidate:
+        raise InvalidURLError("URL must not be empty.")
+
+    if _DISALLOWED_RAW_CHARS.search(candidate):
+        raise InvalidURLError(
+            "Input contains characters that shouldn't appear in a bare "
+            "URL (e.g. markdown/HTML markup or whitespace). Submit just "
+            "the URL itself, not a link label or formatted text."
+        )
+
+    if not _BARE_URL_PATTERN.match(candidate):
+        raise InvalidURLError("Input doesn't look like a valid URL.")
+
+    return candidate
+
 # Feature names, in the exact order extract_features() returns them.
 # Keeping this list alongside the function makes it easy for main.py
 # to label which feature fired when building the explanation list.
@@ -52,6 +114,25 @@ def _get_domain(url: str) -> str:
     return parsed.netloc or parsed.path.split("/")[0]
 
 
+def _has_https_scheme(url: str) -> bool:
+    """
+    Checks whether the URL's scheme is https, using the parsed scheme
+    rather than a raw `startswith("https://")` string check.
+
+    A raw prefix check is fragile: if extract_features() is ever called
+    on a URL missing its scheme (e.g. "www.google.com"), or on malformed
+    input where "https://" appears somewhere other than the very start,
+    a naive prefix check silently reports False for both "no https" and
+    "malformed input" — collapsing two very different situations into
+    one signal. Parsing the scheme explicitly makes the check correct
+    for schemeless input and keeps it from being fooled by garbage
+    elsewhere in the string (validation of that garbage happens earlier,
+    in normalize_and_validate_url).
+    """
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    return parsed.scheme.lower() == "https"
+
+
 def _is_ip_address(domain: str) -> bool:
     """Checks if the domain is a raw IPv4 address instead of a hostname."""
     # Strip a port if present, e.g. "192.168.0.1:8080" -> "192.168.0.1"
@@ -73,8 +154,15 @@ def extract_features(url: str) -> list:
     Returns:
         A list of numbers (ints/floats), in the order defined by
         FEATURE_NAMES. Every feature is either a count or a 0/1 flag.
+
+    Raises:
+        InvalidURLError: if `url` doesn't look like a single bare URL
+            (e.g. it's markdown/HTML, contains embedded whitespace, or
+            has multiple URLs pasted together). Callers (main.py) should
+            catch this and return a 400 rather than letting garbage
+            reach the model.
     """
-    url = url.strip()
+    url = normalize_and_validate_url(url)
     domain = _get_domain(url)
 
     url_length = len(url)
@@ -82,7 +170,7 @@ def extract_features(url: str) -> list:
     has_at_symbol = 1 if "@" in url else 0
     has_hyphen_in_domain = 1 if "-" in domain else 0
     is_ip_address = 1 if _is_ip_address(domain) else 0
-    is_https = 1 if url.lower().startswith("https://") else 0
+    is_https = 1 if _has_https_scheme(url) else 0
 
     # Rough subdomain count: number of dot-separated labels in the domain
     # minus 2 (for the base domain + TLD), floored at 0.
@@ -119,13 +207,19 @@ if __name__ == "__main__":
     # python features.py
     test_urls = [
         "https://www.google.com",
+        "www.google.com",
         "http://192.168.1.1/login",
         "http://secure-bank-verify.com/update-account?user=1234",
         "https://bit.ly/3xyzAbc",
+        "[www.google.com](https://www.google.com)",  # should be rejected
     ]
     for test_url in test_urls:
-        feats = extract_features(test_url)
         print(f"\nURL: {test_url}")
+        try:
+            feats = extract_features(test_url)
+        except InvalidURLError as e:
+            print(f"  REJECTED: {e}")
+            continue
         for name, value in zip(FEATURE_NAMES, feats):
             print(f"  {name}: {value}")
 
