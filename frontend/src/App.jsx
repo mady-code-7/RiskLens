@@ -192,7 +192,9 @@ function RiskLensApp() {
 
       if (!response.ok) {
         const errorBody = await response.json().catch(() => null)
-        throw new Error(errorBody?.detail || `Request failed (${response.status})`)
+        const err = new Error(errorBody?.detail || `Request failed (${response.status})`)
+        err.status = response.status
+        throw err
       }
 
       const data = await response.json()
@@ -218,7 +220,16 @@ function RiskLensApp() {
     if (err.message === 'Failed to fetch') {
       return 'Could not reach the RiskLens API. Please try again shortly.'
     }
-    return 'Take a break. Please try again later.'
+    if (err.status === 400) {
+      // The backend already produced a specific, user-facing reason
+      // (e.g. "doesn't look like a real domain", or the markdown/HTML
+      // rejection message) — show that instead of a generic fallback.
+      return err.message || "That doesn't look like a valid URL."
+    }
+    if (err.status === 429) {
+      return 'Take a break. Please try again later.'
+    }
+    return 'Something went wrong on our end. Please try again shortly.'
   }
 
   const clearLoadingState = () => {
