@@ -128,8 +128,18 @@ def _has_https_scheme(url: str) -> bool:
     for schemeless input and keeps it from being fooled by garbage
     elsewhere in the string (validation of that garbage happens earlier,
     in normalize_and_validate_url).
+
+    Schemeless input (e.g. "www.google.com") is treated as https rather
+    than flagged as "not https". This matches how browsers and most
+    real-world URL sharing actually behaves — users routinely drop the
+    scheme, and modern browsers silently upgrade to https by default.
+    Absence of a scheme isn't itself a signal that a link is unsafe, so
+    it shouldn't be scored as one; only an explicit "http://" should
+    count against a URL here.
     """
-    parsed = urlparse(url if "://" in url else f"http://{url}")
+    if "://" not in url:
+        return True
+    parsed = urlparse(url)
     return parsed.scheme.lower() == "https"
 
 
