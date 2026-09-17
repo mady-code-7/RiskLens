@@ -57,6 +57,14 @@ _BARE_URL_PATTERN = re.compile(
     r"(?:/[^\s]*)?$"                        # optional path/query/fragment
 )
 
+# After the character/shape check above, the authority itself (the host,
+# ignoring any userinfo before an '@' and any port after a ':') must
+# contain a dot — "example.com", "sub.example.co.uk", "192.168.1.1" all
+# qualify. A single bare word like "abc" or "google" has no dot, isn't a
+# resolvable hostname, and isn't a URL a real user would be checking —
+# scoring it just produces a meaningless "Safe" result on non-input.
+_HOST_HAS_DOT_PATTERN = re.compile(r"\.")
+
 
 class InvalidURLError(ValueError):
     """Raised when the input doesn't look like a single bare URL/hostname."""
@@ -88,6 +96,13 @@ def normalize_and_validate_url(raw: str) -> str:
 
     if not _BARE_URL_PATTERN.match(candidate):
         raise InvalidURLError("Input doesn't look like a valid URL.")
+
+    host = _get_domain(candidate).split("@")[-1].split(":")[0]
+    if not host or not _HOST_HAS_DOT_PATTERN.search(host):
+        raise InvalidURLError(
+            "Input doesn't look like a real domain (e.g. \"example.com\"). "
+            "Enter a full URL or hostname, not a single word."
+        )
 
     return candidate
 
